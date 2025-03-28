@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from .backbones import ResNetBackbone
 from .base_method import BaseMethod
 
+
 class CosineMomentumScheduler:
     def __init__(self, base_momentum, final_momentum, n_steps):
         self.momentum = base_momentum
@@ -19,20 +20,19 @@ class CosineMomentumScheduler:
             self.final_momentum
             - (self.final_momentum - self.base_momentum)
             * (math.cos(math.pi * step / self.n_steps) + 1)
+            / 2
         )
 
 
 class BYOL(BaseMethod):
     def __init__(
-            self, 
-            encoder_s: ResNetBackbone,
-            endoer_t: ResNetBackbone,
-            base_momentum: float,
-            final_momentum: float,
-            final_momentum: float,
-            final_momentum: float,
-            n_steps: int,
-    ): 
+        self,
+        encoder_s: ResNetBackbone,
+        encoder_t: ResNetBackbone,
+        base_momentum: float,
+        final_momentum: float,
+        n_steps: int,
+    ):
         super().__init__()
 
         self.encoder_s = encoder_s
@@ -45,7 +45,6 @@ class BYOL(BaseMethod):
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, output_dim),
         )
-
         self.projector_s = build_block(z_dim, z_dim, 256)
         self.projector_t = build_block(z_dim, z_dim, 256)
         self.predictor = build_block(256, 512, 256)
@@ -63,22 +62,23 @@ class BYOL(BaseMethod):
         with torch.no_grad():
             z1p = self.projector_t(self.encoder_t(x1))
             z2p = self.projector_t(self.encoder_t(x2))
-            z1p F.normalize(z2p, dim=-1)
+            z1p = F.normalize(z1p, dim=-1)
+            z2p = F.normalize(z2p, dim=-1)
 
         return 4 - 2 * (
             F.cosine_similarity(z1, z2p).mean() + F.cosine_similarity(z2, z1p).mean()
         )
+
     @torch.no_grad()
     def step(self, step: int):
         super().step(step)
         m = self.momentum_schedule.momentum
         self.momentum_schedule.step(step)
         for param_s, param_t in zip(
-            self.encoder_s.parameter(), self.encoder_t.parameters()
+            self.encoder_s.parameters(), self.encoder_t.parameters()
         ):
-            param_t.data.mul(m).add_((1 - m) * param_s.detach().data)
+            param_t.data.mul_(m).add_((1 - m) * param_s.detach().data)
         for param_s, param_t in zip(
             self.projector_s.parameters(), self.projector_t.parameters()
         ):
-            
             param_t.data.mul_(m).add_((1 - m) * param_s.detach().data)
