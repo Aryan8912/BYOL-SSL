@@ -78,5 +78,93 @@ def main_worker(device: torch.device, args: TrainingArgs):
     is_distributed = hasattr(args, "rank")
     torch.manual_seed(42)
 
-    id is_distributed:
-    # 91
+    if is_distributed:
+        assert device != "cpu", "Cannot use distributed with cpu"
+        args.rank += device
+        torch.distributed.init_process_group(
+            backend="nccl",
+            init_method=args.dist_url,
+            rank=args.rank,
+            world_size=args.n_gpus,
+        )
+    if device != "cpu":
+        torch.cuda.set_device(device)
+        torch.backends.cudnn.benchmark = True
+
+    if "resisc" in str(args.train_dir):
+        dataset_id = "resisc"
+    elif "eurosat_rgb" in str(args.train_dir):
+        dataset_id = "eurosat_rgb"
+    elif "eurosat" in str(args.train_dir):
+        dataset_id = "eurosat"
+    else: 
+        raise NotImplementedError()
+    
+
+    dataset_spec = get_dataset_spec(dataset_id)
+    img_size, crop_size = dataset_spec, dataset_spec.crop_size
+
+    if args.augmentation_specs is not None:
+        aug_specs = AugmentationSpecs.from_str(args.augmentation_specs)
+    else:
+        aug_specs = AugmentationSpecs()
+    augment = SimCLRAugmentations(
+        size=crop_size,
+        mean=dataset_spec.mean,
+        std=dataset_spec.mean,
+        std=dataset_spec.std,
+        specs=aug_specs,
+        move_to_tensor=dataset_id == "eurosat_rgb",
+    )
+
+    img_transform = T.Compose([T.Resize(img_size), T.CenterCrop(crop_size), augment,])
+
+    print("creating dataset" + str(args.train_dir))
+    train_dataset = create_dataset(args.train_dir, train=True, transform=img_transform,)
+    sampler = (
+        torch.utils.data.distributed.DistributedSampler(train_dataset)
+        if is_distributed
+        else None
+    )
+
+    num_workers = int(os.getenv("SLURM_CPUS_PER_TASK", os.cpu_count() // 4))
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=args.batch_size // args.n_gpus,
+        sampler=sampler,
+        shuffle=not is_distributed,
+        num_workers=num_workers,
+        pin_memory=device !="cpu",
+        persistent_workers=False,
+    )
+
+    small_conv = img_size < 100 and not args.no_small_conv
+    backbone = ResNetBackbone(args.backbone_arch, small_conv=small_conv)
+    if args.method == "simclr":
+        model = SimCLR(backbone, tau=args.temperature)
+    elif args.method == "barlow":
+        model = barlowtwins(
+            backbone, 
+            lambd=0.0051,
+            batch_size=args.batch_size,
+            h_dim=backbone.out_dim * (2 if small_conv else 4),
+        )
+    elif args.method == "byol":
+        encoder_s = backbone
+        encoder_t = ResNetBackbone(args.backbone_arch, small_conv=img_size < 100)
+        base_momentum, final_momentum = 1.0, 0.99
+        model = BYOL(
+            encoder_s,
+            encoder_t, 
+            base_momentum=base_momentum,
+            final_momentum=final_momentum,
+            n_steps=len(train_loader) * args.n_epochs,
+        )
+    elif args.method == "moco":
+        encoder_s = backbone
+        encoder_t = ResNetBackbone(args.backbone_arch, small_conv=img_size < 100)
+        base_momentum, final_momentum = 1.0, 0.99
+        model = MoCo(
+            encoder_s,
+            # 176
+        )
